@@ -42,6 +42,48 @@ export const resetGlobalPage = () => {
 }
 export const usePath = () => {
   const { pathname, to, searchParams } = useRouter()
+
+  // 统一的路径处理函数
+  const getProcessedPath = (path: string): string => {
+    // 如果路径已经包含了权限路径，直接返回
+
+    const userPermissions = me().permissions || []
+    for (const perm of userPermissions) {
+      if (path.startsWith(perm.path)) {
+        return path
+      }
+    }
+
+    // 查找最匹配的权限路径
+    let bestMatch = userPermissions[0]
+    let maxMatchLength = 0
+
+    for (const perm of userPermissions) {
+      const cleanPath = path.replace(/^\/|\/$/g, "")
+      const cleanPermPath = perm.path.replace(/^\/|\/$/g, "")
+
+      if (
+        cleanPath.includes(cleanPermPath) &&
+        cleanPermPath.length > maxMatchLength
+      ) {
+        bestMatch = perm
+        maxMatchLength = cleanPermPath.length
+      }
+    }
+
+    // 如果找到匹配的权限路径，返回完整路径
+    if (bestMatch && maxMatchLength > 0) {
+      return pathJoin(bestMatch.path, path)
+    }
+
+    // 如果没有找到匹配，使用第一个权限路径
+    if (userPermissions.length > 0) {
+      return pathJoin(userPermissions[0].path, path)
+    }
+
+    return path
+  }
+
   const [, getObj] = useFetch((path: string) =>
     fsGet(
       path,
@@ -66,9 +108,17 @@ export const usePath = () => {
         index: arg?.index,
         size: arg?.size,
       }
-      // setSearchParams(page);
+      console.log("getObjs", arg?.path)
+      const processedPath = getProcessedPath(arg?.path || "/")
+      console.log(
+        "fsList processedPath:",
+        arg?.path || "/",
+        "->",
+        processedPath,
+      )
+
       return fsList(
-        arg?.path,
+        processedPath,
         password(),
         page.index,
         page.size,
@@ -102,20 +152,59 @@ export const usePath = () => {
     rp?: boolean,
     force?: boolean,
   ) => {
-    cancelObj?.()
+    // cancelObj?.()
     cancelList?.()
     retry_pass = rp ?? false
     ObjStore.setErr("")
-    if (hasHistory(path, index)) {
-      log(`handle [${getHistoryKey(path, index)}] from history`)
-      return recoverHistory(path, index)
-    } else if (IsDirRecord[path]) {
-      log(`handle [${getHistoryKey(path, index)}] as folder`)
-      return handleFolder(path, index, undefined, undefined, force)
-    } else {
-      log(`handle [${getHistoryKey(path, index)}] as obj`)
-      return handleObj(path, index)
+
+    // 如果是初始状态且当前路径是根路径，检查权限路径
+    if (!force && first_fetch && path === "/") {
+      first_fetch = false
+      const userPermissions = me().permissions || []
+      // 如果有权限路径是"/"，直接获取文件列表
+      if (userPermissions.some((perm) => perm.path === "/")) {
+        return handleFolder("/", index)
+      }
+      // 否则显示权限目录列表
+      if (userPermissions.length > 0) {
+        const permDirs = userPermissions.map((perm) => ({
+          name: perm.path.split("/").filter(Boolean).pop() || perm.path,
+          size: 0,
+          is_dir: true,
+          modified: new Date().toISOString(),
+          created: new Date().toISOString(),
+          sign: "",
+          thumb: "",
+          type: 1, // FOLDER
+          path: perm.path,
+          selected: false,
+        }))
+
+        ObjStore.setObjs(permDirs)
+        ObjStore.setTotal(permDirs.length)
+        ObjStore.setState(State.Folder)
+      } else {
+        ObjStore.setState(State.Initial)
+      }
+      return Promise.resolve()
     }
+
+    // 如果不是首次加载，或者当前路径不是根路径，正常处理路径
+    if (first_fetch) {
+      first_fetch = false
+    }
+
+    if (hasHistory(path, index)) {
+      return recoverHistory(path, index)
+    }
+
+    // 检查路径是否已知为目录
+    if (IsDirRecord[path]) {
+      return handleFolder(path, index, undefined, undefined, force)
+    }
+
+    // 如果不知道是文件还是目录，先调用fsget接口判断
+    return handleObj(path, index)
   }
 
   // handle enter obj that don't know if it is dir or file
@@ -172,6 +261,8 @@ export const usePath = () => {
         ObjStore.setHeader(data.header)
         ObjStore.setWrite(data.write)
         ObjStore.setProvider(data.provider)
+        // 设置路径为目录
+        setPathAs(path)
         ObjStore.setState(State.Folder)
       },
       handleErr,
@@ -179,28 +270,93 @@ export const usePath = () => {
   }
 
   const handleErr = (msg: string, code?: number) => {
+    const currentPath = pathname()
+    const userPermissions = me().permissions || []
+    // 如果是403权限错误，返回到根目录并显示权限目录
     if (code === 403) {
-      ObjStore.setState(State.NeedPassword)
-      if (retry_pass) {
-        notify.error(msg)
+      if (currentPath === "/" || userPermissions.length === 0) {
+        const permDirs = userPermissions.map((perm) => ({
+          name: perm.path.split("/").filter(Boolean).pop() || perm.path,
+          size: 0,
+          is_dir: true,
+          modified: new Date().toISOString(),
+          created: new Date().toISOString(),
+          sign: "",
+          thumb: "",
+          type: 1, // FOLDER
+          path: perm.path,
+          selected: false,
+        }))
+
+        ObjStore.setObjs(permDirs)
+        ObjStore.setTotal(permDirs.length)
+        ObjStore.setState(State.Folder)
+        to("/")
+      } else {
+        ObjStore.setState(State.NeedPassword)
       }
-    } else {
-      const basePath = me().base_path
-      if (
-        first_fetch &&
-        basePath != "/" &&
-        pathname().includes(basePath) &&
-        msg.endsWith("object not found")
-      ) {
-        first_fetch = false
-        to(pathname().replace(basePath, ""))
+      return
+    }
+
+    // 如果是存储未找到错误
+    if (
+      msg.includes("storage not found") ||
+      msg.includes("please add a storage")
+    ) {
+      ObjStore.setErr(msg)
+      ObjStore.setState(State.Initial)
+      return
+    }
+
+    // 如果是根路径访问，显示所有权限目录
+    if (currentPath === "/") {
+      if (userPermissions.length > 0) {
+        const permDirs = userPermissions.map((perm) => ({
+          name: perm.path.split("/").filter(Boolean).pop() || perm.path,
+          size: 0,
+          is_dir: true,
+          modified: new Date().toISOString(),
+          created: new Date().toISOString(),
+          sign: "",
+          thumb: "",
+          type: 1, // FOLDER
+          path: perm.path,
+          selected: false,
+        }))
+
+        ObjStore.setObjs(permDirs)
+        ObjStore.setTotal(permDirs.length)
+        ObjStore.setState(State.Folder)
         return
       }
-      if (code === undefined || code >= 0) {
-        ObjStore.setErr(msg)
+    } else {
+      // 检查当前路径是否是某个权限路径的子路径
+      const matchedPerm = userPermissions.find((perm) => {
+        // 移除开头的斜杠以便比较
+        const cleanCurrentPath = currentPath.replace(/^\//, "")
+        const cleanPermPath = perm.path.replace(/^\//, "")
+        return (
+          cleanCurrentPath.includes(cleanPermPath) ||
+          cleanPermPath.includes(cleanCurrentPath)
+        )
+      })
+
+      // 如果找到匹配的权限路径，重定向到正确的完整路径
+      if (matchedPerm) {
+        const pathParts = currentPath.split("/").filter(Boolean)
+        const permParts = matchedPerm.path.split("/").filter(Boolean)
+
+        // 如果当前路径是权限路径的一部分，重定向到完整的权限路径
+        if (pathParts.some((part) => permParts.includes(part))) {
+          to(matchedPerm.path)
+          return
+        }
       }
     }
+    ObjStore.setErr(msg)
+    ObjStore.setState(State.Initial)
   }
+
   const loadMore = () => {
     return handleFolder(pathname(), globalPage + 1, undefined, true)
   }

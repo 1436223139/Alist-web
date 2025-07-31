@@ -1,6 +1,7 @@
 {
   "allow_indexed": "Allow indexed",
   "allow_mounted": "Allow mounted",
+  "use_newui": "Use new ui",
   "announcement": "Announcement",
   "aria2_secret": "Aria2 secret",
   "aria2_uri": "Aria2 uri",
@@ -121,6 +122,7 @@
   "transmission_seedtime": "Transmission seedtime",
   "transmission_uri": "Transmission uri",
   "upload_task_threads_num": "Upload task threads num",
+  "use_newui": "Use newui",
   "version": "Version",
   "video_autoplay": "Video autoplay",
   "video_types": "Video types",
